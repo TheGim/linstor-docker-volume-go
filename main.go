@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/docker/go-connections/sockets"
 	"github.com/docker/go-plugins-helpers/volume"
 )
 
 const (
-	config = "/etc/linstor/docker-volume.conf"
-	plugin = "linstor"
+	config    = "/etc/linstor/docker-volume.conf"
+	plugin    = "linstor"
+	socketDir = "/run/docker/plugins"
 )
 
 var (
@@ -30,7 +32,18 @@ func main() {
 		return
 	}
 
+	if err := os.MkdirAll(socketDir, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	listener, err := sockets.NewUnixSocket(filepath.Join(socketDir, plugin+".sock"), 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	defer listener.Close()
+
 	driver := NewLinstorDriver(config, node, root)
-	handler := volume.NewHandler(driver)
-	fmt.Println(handler.ServeUnix(plugin, 0))
+	server := newVolumeServer(driver)
+	fmt.Println(server.Serve(listener))
 }

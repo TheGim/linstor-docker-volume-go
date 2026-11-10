@@ -101,10 +101,10 @@ func (l *LinstorDriver) newBaseURL(hosts string) (*url.URL, error) {
 	return url.Parse(scheme + "://" + host)
 }
 
-func (l *LinstorDriver) newClient() (*client.Client, error) {
+func (l *LinstorDriver) newClient() (*client.Client, func(), error) {
 	config := new(LinstorConfig)
 	if err := l.loadConfig(config); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	err := envconfig.InitWithOptions(config, envconfig.Options{
@@ -112,12 +112,12 @@ func (l *LinstorDriver) newClient() (*client.Client, error) {
 		AllOptional: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	baseURL, err := l.newBaseURL(config.Controllers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tlsConfig, err := tlsconfig.Client(tlsconfig.Options{
@@ -128,21 +128,24 @@ func (l *LinstorDriver) newClient() (*client.Client, error) {
 		ExclusiveRootPools: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return client.NewClient(
+	// The client is scoped to one driver operation. Close its idle connections when it finishes.
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+	c, err := client.NewClient(
 		client.BaseURL(baseURL),
 		client.BasicAuth(&client.BasicAuthCfg{
 			Username: config.Username,
 			Password: config.Password,
 		}),
-		client.HTTPClient(&http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: tlsConfig,
-			},
-		}),
+		client.HTTPClient(httpClient),
 	)
+	return c, httpClient.CloseIdleConnections, err
 }
 
 func (l *LinstorDriver) newParams(name string, options map[string]string) (*LinstorParams, error) {
@@ -231,10 +234,11 @@ func (l *LinstorDriver) Create(req *volume.CreateRequest) error {
 	if err != nil {
 		return err
 	}
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 	err = c.ResourceDefinitions.Create(ctx, client.ResourceDefinitionCreate{
 		ResourceDefinition: client.ResourceDefinition{
@@ -260,10 +264,11 @@ func (l *LinstorDriver) Create(req *volume.CreateRequest) error {
 }
 
 func (l *LinstorDriver) Get(req *volume.GetRequest) (*volume.GetResponse, error) {
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return nil, err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 	resourceDef, err := c.ResourceDefinitions.Get(ctx, req.Name)
 	if err != nil {
@@ -280,10 +285,11 @@ func (l *LinstorDriver) Get(req *volume.GetRequest) (*volume.GetResponse, error)
 }
 
 func (l *LinstorDriver) List() (*volume.ListResponse, error) {
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return nil, err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 	resourceDefs, err := c.ResourceDefinitions.GetAll(ctx)
 	if err != nil {
@@ -315,10 +321,11 @@ func (l *LinstorDriver) Mount(req *volume.MountRequest) (*volume.MountResponse, 
 	if err != nil {
 		return nil, err
 	}
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return nil, err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 	if _, err = c.Resources.Get(ctx, req.Name, l.node); err == client.NotFoundError {
 		err = c.Resources.Create(ctx, l.toDisklessCreate(req.Name, l.node, params))
@@ -466,10 +473,11 @@ func (l *LinstorDriver) toDisklessCreate(name, node string, params *LinstorParam
 
 func (l *LinstorDriver) isDiskless(name string) (bool, error) {
 	lopt := client.ListOpts{Resource: []string{name}, Node: []string{l.node}}
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return false, err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 
 	// view to get storage information as well
@@ -488,10 +496,11 @@ func (l *LinstorDriver) isDiskless(name string) (bool, error) {
 }
 
 func (l *LinstorDriver) remove(name string, global bool) error {
-	c, err := l.newClient()
+	c, closeIdleConnections, err := l.newClient()
 	if err != nil {
 		return err
 	}
+	defer closeIdleConnections()
 	ctx := context.Background()
 
 	if !global {
